@@ -331,7 +331,6 @@ class DbrxAttention(nn.Module):
 
         # pylint: disable=invalid-name
         if config.qkv_split:
-            self.num_key_value_heads = config.attn_config.kv_n_heads
             self.q_proj = RowParallelLinear(
                 self.d_model,
                 self.d_model,
@@ -341,14 +340,14 @@ class DbrxAttention(nn.Module):
 
             self.k_proj = RowParallelLinear(
                 self.d_model,
-                self.num_key_value_heads * self.head_dim,
+                config.attn_config.kv_n_heads * self.head_dim,
                 bias=False,
                 linear_method=linear_method,
             )
 
             self.v_proj = RowParallelLinear(
                 self.d_model,
-                self.num_key_value_heads * self.head_dim,
+                config.attn_config.kv_n_heads * self.head_dim,
                 bias=False,
                 linear_method=linear_method,
             )
