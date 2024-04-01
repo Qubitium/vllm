@@ -64,11 +64,13 @@ class DbrxExperts(nn.Module):
 
     def __init__(
         self,
+        index: int,
         config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
         params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
+        self.index = index
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_total_experts = config.ffn_config.moe_num_experts
         self.top_k = config.ffn_config.moe_top_k
@@ -315,12 +317,13 @@ class DbrxBlock(nn.Module):
 
     def __init__(
         self,
+        index: int,
         config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.norm_attn_norm = DbrxFusedNormAttention(config, linear_method)
-        self.ffn = DbrxExperts(config, linear_method)
+        self.ffn = DbrxExperts(index, config, linear_method)
 
     def forward(
         self,
@@ -353,7 +356,7 @@ class DbrxModel(nn.Module):
             config.d_model,
         )
         self.blocks = nn.ModuleList(
-            [DbrxBlock(config, linear_method) for _ in range(config.n_layers)])
+            [DbrxBlock(i, config, linear_method) for i in range(config.n_layers)])
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
         for module in self.modules():
             if hasattr(module, "bias") and isinstance(module.bias,
