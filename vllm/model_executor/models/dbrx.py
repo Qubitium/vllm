@@ -270,9 +270,7 @@ class DbrxAttention(nn.Module):
                 v = v.clamp(min=-self.clip_qkv, max=self.clip_qkv)
             else:
                 qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
-
-        if not self.qkv_split:
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
