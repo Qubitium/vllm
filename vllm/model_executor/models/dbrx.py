@@ -168,6 +168,7 @@ class DbrxAttention(nn.Module):
         self,
         config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        qkv_split: Optional[bool] = False,
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -177,16 +178,40 @@ class DbrxAttention(nn.Module):
         self.clip_qkv = config.attn_config.clip_qkv
         self.rope_theta = config.attn_config.rope_theta
         self.max_position = config.max_seq_len
+        self.qkv_split = qkv_split
 
         # pylint: disable=invalid-name
-        self.Wqkv = QKVParallelLinear(
-            self.d_model,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=False,
-            linear_method=linear_method,
-        )
+        if self.qkv_split:
+            self.q_proj = RowParallelLinear(
+                self.d_model,
+                self.d_model,
+                bias=False,
+                linear_method=linear_method,
+            )
+
+            self.k_proj = RowParallelLinear(
+                self.d_model,
+                self.d_model,
+                bias=False,
+                linear_method=linear_method,
+            )
+
+            self.v_proj = RowParallelLinear(
+                self.d_model,
+                self.d_model,
+                bias=False,
+                linear_method=linear_method,
+            )
+        else:
+            self.Wqkv = QKVParallelLinear(
+                self.d_model,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=False,
+                linear_method=linear_method,
+            )
+
         self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
@@ -231,10 +256,24 @@ class DbrxAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.Wqkv(hidden_states)
+        if self.qkv_split:
+            q = self.q_proj(hidden_states)
+            k = self.k_proj(hidden_states)
+            v = self.v_proj(hidden_states)
+        else:
+            qkv, _ = self.Wqkv(hidden_states)
+
         if self.clip_qkv is not None:
-            qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            if self.qkv_split:
+                q = q.clamp(min=-self.clip_qkv, max=self.clip_qkv)
+                k = k.clamp(min=-self.clip_qkv, max=self.clip_qkv)
+                v = v.clamp(min=-self.clip_qkv, max=self.clip_qkv)
+            else:
+                qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
+
+        if not self.qkv_split:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         hidden_states, _ = self.out_proj(attn_output)
@@ -355,6 +394,7 @@ class DbrxForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
+        self.qkv_split = False
         self.unpadded_vocab_size = config.vocab_size
         self.transformer = DbrxModel(config, linear_method)
         self.lm_head = ParallelLMHead(
@@ -416,6 +456,10 @@ class DbrxForCausalLM(nn.Module):
                 break
             else:
                 param = params_dict[name]
+                # dbrx converted v2 model has Wqkv split into q_proj, k_proj and v_proj
+                if "q_proj" in name:
+                    self.qkv_split = True
+
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
