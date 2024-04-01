@@ -395,8 +395,9 @@ class DbrxForCausalLM(nn.Module):
         # dbrx official cannot be easily trained or quantized due to fused Wqkv
         # restructured model for efficient training and quantization has qkv split into
         # q_proj, k_proj and v_proj
-        # ref: https://huggingface.co/LnL-AI/dbrx-base-converted-v2
-        # ref: https://github.com/OpenAccess-AI-Collective/axolotl/pull/1462
+        # ref [converted model]: https://huggingface.co/LnL-AI/dbrx-base-converted-v2
+        # ref [training]: https://github.com/OpenAccess-AI-Collective/axolotl/pull/1462
+        # ref [quantization]: https://github.com/AutoGPTQ/AutoGPTQ/pull/625
         self.qkv_split = False
         self.unpadded_vocab_size = config.vocab_size
         self.transformer = DbrxModel(config, linear_method)
