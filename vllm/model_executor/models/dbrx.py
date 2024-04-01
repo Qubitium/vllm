@@ -192,14 +192,14 @@ class DbrxAttention(nn.Module):
 
             self.k_proj = RowParallelLinear(
                 self.d_model,
-                self.d_model,
+                self.num_key_value_heads * self.head_dim,
                 bias=False,
                 linear_method=linear_method,
             )
 
             self.v_proj = RowParallelLinear(
                 self.d_model,
-                self.d_model,
+                self.num_key_value_heads * self.head_dim,
                 bias=False,
                 linear_method=linear_method,
             )
