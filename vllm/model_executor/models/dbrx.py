@@ -255,7 +255,7 @@ class DbrxAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if self.qkv_split:
+        if self.config.qkv_split:
             q = self.q_proj(hidden_states)
             k = self.k_proj(hidden_states)
             v = self.v_proj(hidden_states)
@@ -263,7 +263,7 @@ class DbrxAttention(nn.Module):
             qkv, _ = self.Wqkv(hidden_states)
 
         if self.clip_qkv is not None:
-            if self.qkv_split:
+            if self.config.qkv_split:
                 q = q.clamp(min=-self.clip_qkv, max=self.clip_qkv)
                 k = k.clamp(min=-self.clip_qkv, max=self.clip_qkv)
                 v = v.clamp(min=-self.clip_qkv, max=self.clip_qkv)
