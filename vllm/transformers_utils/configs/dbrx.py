@@ -189,14 +189,21 @@ class DbrxConfig(PretrainedConfig):
         ffn_config (`dict`, *optional*):
             A dictionary used to configure the model's FFN module.
         use_cache (`bool`, *optional*, defaults to `False`):
-            Whether or not the model should return the last key/values attentions (not used by all models).
+            Whether the model should return the last key/values attentions (not used by all models).
         initializer_range (`float`, *optional*, defaults to 0.02):
             The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
         output_router_logits (`bool`, *optional*, defaults to `False`):
-            Whether or not the router logits should be returned by the model. Enabling this will also
+            Whether the router logits should be returned by the model. Enabling this will also
             allow the model to output the auxiliary loss. See [here]() for more details
         router_aux_loss_coef (`float`, *optional*, defaults to 0.001):
             The aux loss factor for the total loss.
+        qkv_split (`bool`, *optional*, default to `Fasle`):
+            Whether the Wqkv fused layer is split into 3: q_proj, k_proj, and v_proj.
+            Dbrx official base/instruct cannot be easily trained or quantized due to fused Wqkv.
+            Use converted model for efficient training and quantization.
+            ref [converted model]: https://huggingface.co/LnL-AI/dbrx-base-converted-v2
+            ref [training]: https://github.com/OpenAccess-AI-Collective/axolotl/pull/1462
+            ref [quantization]: https://github.com/AutoGPTQ/AutoGPTQ/pull/625
 
 
     Example:
@@ -237,6 +244,7 @@ class DbrxConfig(PretrainedConfig):
         initializer_range: float = 0.02,
         output_router_logits: bool = False,
         router_aux_loss_coef: float = 0.05,
+        qkv_split: Optional[bool] = False,
         **kwargs: Any,
     ):
         if attn_config is None:
@@ -264,6 +272,7 @@ class DbrxConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
+        self.qkv_split = qkv_split
 
         tie_word_embeddings = kwargs.pop("tie_word_embeddings", False)
         if tie_word_embeddings:

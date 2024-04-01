@@ -168,7 +168,6 @@ class DbrxAttention(nn.Module):
         self,
         config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
-        qkv_split: Optional[bool] = False,
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -178,10 +177,10 @@ class DbrxAttention(nn.Module):
         self.clip_qkv = config.attn_config.clip_qkv
         self.rope_theta = config.attn_config.rope_theta
         self.max_position = config.max_seq_len
-        self.qkv_split = qkv_split
+        self.qkv_split = config.qkv_split
 
         # pylint: disable=invalid-name
-        if self.qkv_split:
+        if self.config.qkv_split:
             self.q_proj = RowParallelLinear(
                 self.d_model,
                 self.d_model,
@@ -392,13 +391,6 @@ class DbrxForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        # dbrx official cannot be easily trained or quantized due to fused Wqkv
-        # restructured model for efficient training and quantization has qkv split into
-        # q_proj, k_proj and v_proj
-        # ref [converted model]: https://huggingface.co/LnL-AI/dbrx-base-converted-v2
-        # ref [training]: https://github.com/OpenAccess-AI-Collective/axolotl/pull/1462
-        # ref [quantization]: https://github.com/AutoGPTQ/AutoGPTQ/pull/625
-        self.qkv_split = False
         self.unpadded_vocab_size = config.vocab_size
         self.transformer = DbrxModel(config, linear_method)
         self.lm_head = ParallelLMHead(
@@ -462,7 +454,7 @@ class DbrxForCausalLM(nn.Module):
                 param = params_dict[name]
                 # check if Wqkv layer is split
                 if "q_proj" in name:
-                    self.qkv_split = True
+                    self.config.qkv_split = True
 
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
