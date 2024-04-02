@@ -123,7 +123,6 @@ class DbrxExperts(nn.Module):
         # DBRX uses GLU for each experts.
         # GLU has 3 linear layers: w1, v1 and w2.
 
-        print("DbrxExperts weight_loader", shard, shard_size, tp_rank, param_data.shape, self.intermediate_size, self.tp_size, self.d_model)
         if weight_name.endswith("w1"):
             loaded_weight = torch.reshape(
                 loaded_weight,
@@ -421,11 +420,10 @@ class DbrxForCausalLM(nn.Module):
         weights_iterator = get_weights_iterator(self.config, model_name_or_path, cache_dir, load_format, revision)
 
         for name, loaded_weight in weights_iterator:
-            print("hf_model_weights_iterator", name, loaded_weight.shape)
             for param_name, weight_name in expert_params_mapping:
                 if weight_name not in name:
                     continue
-                print("load", name, weight_name, loaded_weight.shape)
+                # print("load", name, weight_name, loaded_weight.shape)
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -440,8 +438,6 @@ class DbrxForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-
-        raise Exception("load_weights end, stop it.")
 
 
 def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, revision):
@@ -460,12 +456,16 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
                                       }
     new_weights_iterator = []
 
+    q_proj_name = "norm_attn_norm.attn.q_proj.weight"
+    k_proj_name = "norm_attn_norm.attn.k_proj.weight"
+    v_proj_name = "norm_attn_norm.attn.v_proj.weight"
+
     for name, loaded_weight in weights_iterator:
 
         split_result = [s.strip() for s in name.split(".") if s]
 
         # example name: transformer.blocks.0.ffn.experts.mlp.15.w2.weight
-        if len(split_result) == 9 and split_result[1] == "blocks":
+        if len(split_result) == 9 and split_result[5] == "mlp":
             block_index = split_result[2]
             mlp_index = int(split_result[6])
             if name.endswith("w1.weight"):
@@ -478,16 +478,34 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
                 ws_ws2_weight_dict[block_index]["w2_weight_tensors"][mlp_index] = loaded_weight
                 continue
 
+        # example name: transformer.blocks.0.norm_attn_norm.attn.k_proj.weight
+        if len(split_result) == 7 and split_result[4] == "attn":
+            block_index = split_result[2]
+            if name.endswith(q_proj_name):
+                ws_ws2_weight_dict[block_index][q_proj_name] = loaded_weight
+                continue
+            elif name.endswith(k_proj_name):
+                ws_ws2_weight_dict[block_index][k_proj_name] = loaded_weight
+                continue
+            elif name.endswith(v_proj_name):
+                ws_ws2_weight_dict[block_index][v_proj_name] = loaded_weight
+                continue
+
         new_weights_iterator.append((name, loaded_weight))
 
 
     # merge ffn.experts.mlp w1/v1/w2 weights
     for k, v in ws_ws2_weight_dict.items():
-        prefix = f"transformer.blocks.{k}.ffn.experts.mlp."
+        mlp_prefix = f"transformer.blocks.{k}.ffn.experts.mlp."
         start = time.perf_counter()
-        new_weights_iterator.append((f"{prefix}w1", torch.cat(v["w1_weight_tensors"], dim=0)))
-        new_weights_iterator.append((f"{prefix}v1", torch.cat(v["v1_weight_tensors"], dim=0)))
-        new_weights_iterator.append((f"{prefix}w2", torch.cat(v["w2_weight_tensors"], dim=0)))
-        print(f"merged {prefix} w1/v1/w2 weights ... take {time.perf_counter()-start} s.")
+        new_weights_iterator.append((f"{mlp_prefix}w1", torch.cat(v["w1_weight_tensors"], dim=0)))
+        new_weights_iterator.append((f"{mlp_prefix}v1", torch.cat(v["v1_weight_tensors"], dim=0)))
+        new_weights_iterator.append((f"{mlp_prefix}w2", torch.cat(v["w2_weight_tensors"], dim=0)))
+        print(f"merged {mlp_prefix}w1/v1/w2 weights ... take {time.perf_counter()-start} s.")
+
+        start = time.perf_counter()
+        qkv_prefix = f"transformer.blocks.{k}.norm_attn_norm.attn.Wqkv.weight"
+        new_weights_iterator.append((qkv_prefix, torch.cat([v[q_proj_name], v[k_proj_name], v[v_proj_name]], dim=0)))
+        print(f"merged {qkv_prefix} qkv weights ... take {time.perf_counter() - start} s.")
 
     return new_weights_iterator
