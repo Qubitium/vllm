@@ -475,7 +475,6 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
         split_result = [s.strip() for s in name.split(".") if s]
 
         # example name: transformer.blocks.0.ffn.experts.mlp.15.w2.weight
-        print("split_result", name, split_result)
         if (len(split_result) == 9 and split_result[3] == "ffn" and split_result[4] == "experts"
                 and split_result[5] == "mlp" and split_result[-1] == "weight"):
             block_index = split_result[2]
