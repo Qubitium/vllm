@@ -431,10 +431,6 @@ class DbrxForCausalLM(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                # check if Wqkv layer is split
-                if "q_proj" in name:
-                    self.config.qkv_split = True
-
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -444,7 +440,14 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
     weights_iterator = hf_model_weights_iterator(
         model_name_or_path, cache_dir, load_format, revision)
 
-    if not config.qkv_split:
+    qkv_split = False
+    for name, _ in weights_iterator:
+        # check if Wqkv layer is split
+        if "q_proj" in name:
+            qkv_split = True
+            break
+
+    if not qkv_split:
         return weights_iterator
 
     ws_ws2_weight_dict = {}
