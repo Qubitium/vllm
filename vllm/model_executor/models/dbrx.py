@@ -515,7 +515,7 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
         # 2. reshape back to riginal
         w2 = torch.cat(v[w2_weight_name], dim=0).t()
 
-        new_weights_iterator.append((f"{mlp_prefix}w2", w2.t()))
+        new_weights_iterator.append((f"{mlp_prefix}w2", w2))
 
         print(f"merged {mlp_prefix}w1/v1/w2 weights ... take {time.perf_counter()-start} s.")
 
