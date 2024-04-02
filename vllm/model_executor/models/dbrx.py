@@ -1,7 +1,5 @@
 # coding=utf-8
-from copy import deepcopy
-from functools import partial
-from typing import List, Optional, Callable, Tuple
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -26,7 +24,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.dbrx import DbrxConfig, DbrxFFNConfig
+from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 
 class DbrxRouter(nn.Module):
@@ -55,152 +53,6 @@ class DbrxRouter(nn.Module):
         router_logits, _ = self.layer(hidden_states)
         return router_logits
 
-def resolve_ffn_act_fn(
-        ffn_act_fn: dict) -> Callable[[torch.Tensor], torch.Tensor]:
-    """Resolve the activation function for the feed-forward network.
-
-    Args:
-        ffn_act_fn (dict): The configuration dictionary for the activation function.
-            The dict config must specify the 'name' of a torch.nn.functional activation
-            function. All of other key values pairs are bound to the function as a partial.
-
-    Returns:
-        Callable[[torch.Tensor], torch.Tensor]: The activation function.
-    """
-    config = deepcopy(ffn_act_fn)
-    name = config.pop('name')
-    if not hasattr(nn.functional, name):
-        raise ValueError(f'Unrecognised activation function name ({name}).')
-    act = getattr(nn.functional, name)
-    return partial(act, **config)
-
-class DbrxMLP(nn.Module):
-
-    def __init__(self, hidden_size: int, ffn_hidden_size: int, ffn_act_fn: dict):
-        super().__init__()
-        self.w1 = RowParallelLinear(hidden_size, ffn_hidden_size, bias=False)
-        self.v1 = RowParallelLinear(hidden_size, ffn_hidden_size, bias=False)
-        self.w2 = RowParallelLinear(ffn_hidden_size, hidden_size, bias=False)
-        self.activation_fn = resolve_ffn_act_fn(ffn_act_fn)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        return self.w2(self.activation_fn(self.w1(x)) * self.v1(x))
-
-class DbrxFFNQKVSplit(nn.Module):
-
-    def __init__(self, hidden_size: int, ffn_config: DbrxFFNConfig):
-        super().__init__()
-
-        self.router = DbrxRouterQKVSplit(
-            hidden_size,
-            moe_num_experts=ffn_config.moe_num_experts,
-            moe_top_k=ffn_config.moe_top_k,
-            moe_jitter_eps=ffn_config.moe_jitter_eps,
-            moe_normalize_expert_weights=ffn_config.
-            moe_normalize_expert_weights,
-            uniform_expert_assignment=ffn_config.uniform_expert_assignment,
-        )
-
-        self.experts = DbrxExpertsQKVSplit(
-            hidden_size=hidden_size,
-            ffn_hidden_size=ffn_config.ffn_hidden_size,
-            moe_num_experts=ffn_config.moe_num_experts,
-            ffn_act_fn=ffn_config.ffn_act_fn,
-        )
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        weights, top_weights, top_experts = self.router(x)
-        out = self.experts(x, weights, top_weights, top_experts)
-        return out, weights
-
-class DbrxExpertsQKVSplit(nn.Module):
-
-    def __init__(self, hidden_size: int, ffn_hidden_size: int,
-                 moe_num_experts: int, ffn_act_fn: dict):
-        super().__init__()
-        self.moe_num_experts = moe_num_experts
-        self.mlp = nn.ModuleList([DbrxMLP(hidden_size, ffn_hidden_size, ffn_act_fn) for _ in range(moe_num_experts)])
-
-    def forward(self, x: torch.Tensor, weights: torch.Tensor,
-                top_weights: torch.Tensor,
-                top_experts: torch.LongTensor) -> torch.Tensor:
-        bsz, q_len, hidden_size = x.shape
-        x = x.view(-1, hidden_size)
-        out = torch.zeros_like(x)
-
-        expert_mask = nn.functional.one_hot(
-            top_experts, num_classes=self.moe_num_experts).permute(2, 1, 0)
-        for expert_idx in range(0, self.moe_num_experts):
-            topk_idx, token_idx = torch.where(expert_mask[expert_idx])
-            if token_idx.shape[0] == 0:
-                continue
-
-            expert_tokens = x[None, token_idx].reshape(-1, hidden_size)
-            expert_out = self.mlp[expert_idx](expert_tokens) * top_weights[token_idx, topk_idx, None]
-
-            out.index_add_(0, token_idx, expert_out)
-
-        out = out.reshape(bsz, q_len, hidden_size)
-        return out
-
-class DbrxRouterQKVSplit(nn.Module):
-
-    def __init__(self, hidden_size: int, moe_num_experts: int, moe_top_k: int,
-                 moe_jitter_eps: Optional[float],
-                 moe_normalize_expert_weights: Optional[float],
-                 uniform_expert_assignment: bool):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.moe_num_experts = moe_num_experts
-        self.moe_top_k = moe_top_k
-        self.moe_jitter_eps = moe_jitter_eps
-        self.moe_normalize_expert_weights = moe_normalize_expert_weights
-        self.uniform_expert_assignment = uniform_expert_assignment
-
-        self.layer = nn.Linear(self.hidden_size,
-                               self.moe_num_experts,
-                               bias=False)
-
-    def jitter(self, x: torch.Tensor) -> torch.Tensor:
-        if self.moe_jitter_eps is None:
-            raise RuntimeError('The router does not have moe_jitter_eps set.')
-        low = 1.0 - self.moe_jitter_eps
-        high = 1.0 + self.moe_jitter_eps
-        noise = torch.rand(x.size(), dtype=x.dtype, device=x.device)
-        return low + noise * (high - low)
-
-    def forward(
-            self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.LongTensor]:
-        if self.training and self.moe_jitter_eps is not None:
-            x = x * self.jitter(x)
-
-        weights = self.layer(x.view(-1,
-                                    x.shape[-1])).softmax(dim=-1,
-                                                          dtype=torch.float32)
-        top_weights, top_experts = torch.topk(weights, self.moe_top_k, dim=-1)
-
-        if self.moe_normalize_expert_weights:
-            top_weights = top_weights / torch.norm(
-                top_weights,
-                p=self.moe_normalize_expert_weights,
-                dim=-1,
-                keepdim=True)
-
-        if self.uniform_expert_assignment:
-            with torch.no_grad():
-                uniform_tensor = torch.arange(
-                    0,
-                    top_experts.numel(),
-                    device=top_experts.device,
-                    dtype=top_experts.dtype) % self.moe_num_experts
-                top_experts = uniform_tensor.reshape(top_experts.shape)
-                # Note, weights and top_weights are not changed
-
-        weights = weights.to(x.dtype)
-        top_weights = top_weights.to(x.dtype)
-        return weights, top_weights, top_experts
 
 class DbrxExperts(nn.Module):
     """A tensor-parallel MoE implementation for DBRX.
@@ -330,7 +182,11 @@ class DbrxAttention(nn.Module):
         self.qkv_split = config.qkv_split
 
         # pylint: disable=invalid-name
+<<<<<<< HEAD
         if config.qkv_split:
+=======
+        if self.config.qkv_split:
+>>>>>>> parent of 5051c25 (fix qkv_split layer error)
             self.q_proj = RowParallelLinear(
                 self.d_model,
                 self.d_model,
@@ -340,14 +196,22 @@ class DbrxAttention(nn.Module):
 
             self.k_proj = RowParallelLinear(
                 self.d_model,
+<<<<<<< HEAD
                 config.attn_config.kv_n_heads * self.head_dim,
+=======
+                self.d_model,
+>>>>>>> parent of 5051c25 (fix qkv_split layer error)
                 bias=False,
                 linear_method=linear_method,
             )
 
             self.v_proj = RowParallelLinear(
                 self.d_model,
+<<<<<<< HEAD
                 config.attn_config.kv_n_heads * self.head_dim,
+=======
+                self.d_model,
+>>>>>>> parent of 5051c25 (fix qkv_split layer error)
                 bias=False,
                 linear_method=linear_method,
             )
@@ -405,7 +269,7 @@ class DbrxAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if self.qkv_split:
+        if self.config.qkv_split:
             q = self.q_proj(hidden_states)
             k = self.k_proj(hidden_states)
             v = self.v_proj(hidden_states)
@@ -413,7 +277,7 @@ class DbrxAttention(nn.Module):
             qkv, _ = self.Wqkv(hidden_states)
 
         if self.clip_qkv is not None:
-            if self.qkv_split:
+            if self.config.qkv_split:
                 q = q.clamp(min=-self.clip_qkv, max=self.clip_qkv)
                 k = k.clamp(min=-self.clip_qkv, max=self.clip_qkv)
                 v = v.clamp(min=-self.clip_qkv, max=self.clip_qkv)
@@ -471,10 +335,7 @@ class DbrxBlock(nn.Module):
     ):
         super().__init__()
         self.norm_attn_norm = DbrxFusedNormAttention(config, linear_method)
-        if config.qkv_split:
-            self.ffn = DbrxFFNQKVSplit(hidden_size=config.d_model, ffn_config=config.ffn_config)
-        else:
-            self.ffn = DbrxExperts(index, config, linear_method)
+        self.ffn = DbrxExperts(index, config, linear_method)
 
     def forward(
         self,
@@ -589,32 +450,27 @@ class DbrxForCausalLM(nn.Module):
         load_format: str = "auto",
         revision: Optional[str] = None,
     ):
-        if not self.config.qkv_split:
-            expert_params_mapping = [(
-                "ws" if weight_name in ["w1", "v1"] else "w2s",
-                f"experts.mlp.{weight_name}",
-            ) for weight_name in ["w1", "v1", "w2"]]
+        expert_params_mapping = [(
+            "ws" if weight_name in ["w1", "v1"] else "w2s",
+            f"experts.mlp.{weight_name}",
+        ) for weight_name in ["w1", "v1", "w2"]]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if self.config.qkv_split:
+            for param_name, weight_name in expert_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
                 param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, weight_name)
+                break
+            else:
+                param = params_dict[name]
+                # check if Wqkv layer is split
+                if "q_proj" in name:
+                    self.config.qkv_split = True
 
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-            else:
-                for param_name, weight_name in expert_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, weight_name)
-                    break
-                else:
-                    param = params_dict[name]
-
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
