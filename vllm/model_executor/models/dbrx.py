@@ -454,9 +454,9 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
     ws_ws2_weight_dict = {}
 
     for i in range(config.n_layers):
-        ws_ws2_weight_dict[str(i)] = {"w1_weight_tensors": [],
-                                      "v1_weight_tensors": [],
-                                      "w2_weight_tensors": []
+        ws_ws2_weight_dict[str(i)] = {"w1_weight_tensors": [None for _ in range(config.ffn_config.moe_num_experts)],
+                                      "v1_weight_tensors": [None for _ in range(config.ffn_config.moe_num_experts)],
+                                      "w2_weight_tensors": [None for _ in range(config.ffn_config.moe_num_experts)],
                                       }
     new_weights_iterator = []
 
@@ -464,16 +464,18 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
 
         split_result = [s.strip() for s in name.split(".") if s]
 
+        # example name: transformer.blocks.0.ffn.experts.mlp.15.w2.weight
         if len(split_result) == 9 and split_result[1] == "blocks":
             block_index = split_result[2]
+            mlp_index = int(split_result[6])
             if name.endswith("w1.weight"):
-                ws_ws2_weight_dict[block_index]["w1_weight_tensors"].append(loaded_weight)
+                ws_ws2_weight_dict[block_index]["w1_weight_tensors"][mlp_index] = loaded_weight
                 continue
             elif name.endswith("v1.weight"):
-                ws_ws2_weight_dict[block_index]["v1_weight_tensors"].append(loaded_weight)
+                ws_ws2_weight_dict[block_index]["v1_weight_tensors"][mlp_index] = loaded_weight
                 continue
             elif name.endswith("w2.weight"):
-                ws_ws2_weight_dict[block_index]["w2_weight_tensors"].append(loaded_weight)
+                ws_ws2_weight_dict[block_index]["w2_weight_tensors"][mlp_index] = loaded_weight
                 continue
 
         new_weights_iterator.append((name, loaded_weight))
@@ -481,11 +483,11 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
 
     # merge ffn.experts.mlp w1/v1/w2 weights
     for k, v in ws_ws2_weight_dict.items():
-        prefix = f"transformer.blocks.{k}.ffn.experts.mlp"
+        prefix = f"transformer.blocks.{k}.ffn.experts.mlp."
         start = time.perf_counter()
-        new_weights_iterator.append((f"{prefix}.w1", torch.cat(v["w1_weight_tensors"], dim=0)))
-        new_weights_iterator.append((f"{prefix}.v1", torch.cat(v["v1_weight_tensors"], dim=0)))
-        new_weights_iterator.append((f"{prefix}.w2", torch.cat(v["w2_weight_tensors"], dim=0)))
+        new_weights_iterator.append((f"{prefix}w1", torch.cat(v["w1_weight_tensors"], dim=0)))
+        new_weights_iterator.append((f"{prefix}v1", torch.cat(v["v1_weight_tensors"], dim=0)))
+        new_weights_iterator.append((f"{prefix}w2", torch.cat(v["w2_weight_tensors"], dim=0)))
         print(f"merged {prefix} w1/v1/w2 weights ... take {time.perf_counter()-start} s.")
 
     return new_weights_iterator
