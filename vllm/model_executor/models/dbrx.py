@@ -183,12 +183,12 @@ class DbrxAttention(nn.Module):
 
         # pylint: disable=invalid-name
         self.Wqkv = QKVParallelLinear(
-                self.d_model,
-                self.head_dim,
-                self.total_num_heads,
-                self.total_num_kv_heads,
-                bias=False,
-                linear_method=linear_method,
+            self.d_model,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=False,
+            linear_method=linear_method,
         )
 
         self.out_proj = RowParallelLinear(
@@ -239,7 +239,7 @@ class DbrxAttention(nn.Module):
 
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
