@@ -1,4 +1,5 @@
 # coding=utf-8
+import time
 from typing import List, Optional
 
 import torch
@@ -121,6 +122,8 @@ class DbrxExperts(nn.Module):
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         # DBRX uses GLU for each experts.
         # GLU has 3 linear layers: w1, v1 and w2.
+
+        print("DbrxExperts weight_loader", shard, shard_size, tp_rank, param_data.shape, self.intermediate_size, self.tp_size, self.d_model)
         if weight_name.endswith("w1"):
             loaded_weight = torch.reshape(
                 loaded_weight,
@@ -359,6 +362,7 @@ class DbrxForCausalLM(nn.Module):
         config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
+        print("config",config)
         super().__init__()
         self.config = config
         self.linear_method = linear_method
@@ -399,6 +403,8 @@ class DbrxForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
+
+
     def load_weights(
         self,
         model_name_or_path: str,
@@ -411,11 +417,15 @@ class DbrxForCausalLM(nn.Module):
             f"experts.mlp.{weight_name}",
         ) for weight_name in ["w1", "v1", "w2"]]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+
+        weights_iterator = get_weights_iterator(self.config, model_name_or_path, cache_dir, load_format, revision)
+
+        for name, loaded_weight in weights_iterator:
+            print("hf_model_weights_iterator", name, loaded_weight.shape)
             for param_name, weight_name in expert_params_mapping:
                 if weight_name not in name:
                     continue
+                print("load", name, weight_name, loaded_weight.shape)
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -430,3 +440,52 @@ class DbrxForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+        raise Exception("load_weights end, stop it.")
+
+
+def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, revision):
+    weights_iterator = hf_model_weights_iterator(
+        model_name_or_path, cache_dir, load_format, revision)
+
+    if not config.qkv_split:
+        return weights_iterator
+
+    ws_ws2_weight_dict = {}
+
+    for i in range(config.n_layers):
+        ws_ws2_weight_dict[str(i)] = {"w1_weight_tensors": [],
+                                      "v1_weight_tensors": [],
+                                      "w2_weight_tensors": []
+                                      }
+    new_weights_iterator = []
+
+    for name, loaded_weight in weights_iterator:
+
+        split_result = [s.strip() for s in name.split(".") if s]
+
+        if len(split_result) == 9 and split_result[1] == "blocks":
+            block_index = split_result[2]
+            if name.endswith("w1.weight"):
+                ws_ws2_weight_dict[block_index]["w1_weight_tensors"].append(loaded_weight)
+                continue
+            elif name.endswith("v1.weight"):
+                ws_ws2_weight_dict[block_index]["v1_weight_tensors"].append(loaded_weight)
+                continue
+            elif name.endswith("w2.weight"):
+                ws_ws2_weight_dict[block_index]["w2_weight_tensors"].append(loaded_weight)
+                continue
+
+        new_weights_iterator.append((name, loaded_weight))
+
+
+    # merge ffn.experts.mlp w1/v1/w2 weights
+    for k, v in ws_ws2_weight_dict.items():
+        prefix = f"transformer.blocks.{k}.ffn.experts.mlp"
+        start = time.perf_counter()
+        new_weights_iterator.append((f"{prefix}.w1", torch.cat(v["w1_weight_tensors"], dim=0)))
+        new_weights_iterator.append((f"{prefix}.v1", torch.cat(v["v1_weight_tensors"], dim=0)))
+        new_weights_iterator.append((f"{prefix}.w2", torch.cat(v["w2_weight_tensors"], dim=0)))
+        print(f"merged {prefix} w1/v1/w2 weights ... take {time.perf_counter()-start} s.")
+
+    return new_weights_iterator
