@@ -502,14 +502,27 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
     for k, v in split_weights_dict.items():
         mlp_prefix = f"transformer.blocks.{k}.ffn.experts.mlp."
         start = time.perf_counter()
-        new_weights_iterator.append((f"{mlp_prefix}w1", torch.cat(v[w1_weight_name], dim=0)))
-        new_weights_iterator.append((f"{mlp_prefix}v1", torch.cat(v[v1_weight_name], dim=0)))
-        new_weights_iterator.append((f"{mlp_prefix}w2", torch.cat(v[w2_weight_name], dim=0)))
+
+        #  FIXME.. we need to shape w1/v1 to original shape
+        w1 = torch.cat(v[w1_weight_name], dim=0)
+        v1 = torch.cat(v[v1_weight_name], dim=0)
+
+        new_weights_iterator.append((f"{mlp_prefix}w1", w1))
+        new_weights_iterator.append((f"{mlp_prefix}v1", v1))
+
+        # FIXME.. we need to shape w2 to original shape
+        # 1. reverse via t(): based on reverse convert_v2 code we need to reverse again the w2 tensors via t() op
+        # 2. reshape back to riginal
+        w2 = torch.cat(v[w2_weight_name], dim=0).t()
+
+        new_weights_iterator.append((f"{mlp_prefix}w2", w2.t()))
+
         print(f"merged {mlp_prefix}w1/v1/w2 weights ... take {time.perf_counter()-start} s.")
 
         start = time.perf_counter()
         qkv_prefix = f"transformer.blocks.{k}.norm_attn_norm.attn.Wqkv.weight"
         new_weights_iterator.append((qkv_prefix, torch.cat([v[q_proj_name], v[k_proj_name], v[v_proj_name]], dim=0)))
         print(f"merged {qkv_prefix} qkv weights ... take {time.perf_counter() - start} s.")
+
 
     return new_weights_iterator
