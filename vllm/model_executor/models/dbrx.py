@@ -440,6 +440,9 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
     weights_iterator = hf_model_weights_iterator(
         model_name_or_path, cache_dir, load_format, revision)
 
+    # convert Iterator to List
+    weights_iterator = list(weights_iterator)
+
     qkv_split = False
     for name, _ in weights_iterator:
         # check if Wqkv layer is split
@@ -450,60 +453,59 @@ def get_weights_iterator(config, model_name_or_path, cache_dir, load_format, rev
     if not qkv_split:
         return weights_iterator
 
-    ws_ws2_weight_dict = {}
+    split_weights_dict = {}
 
-    for i in range(config.n_layers):
-        ws_ws2_weight_dict[str(i)] = {"w1_weight_tensors": [None for _ in range(config.ffn_config.moe_num_experts)],
-                                      "v1_weight_tensors": [None for _ in range(config.ffn_config.moe_num_experts)],
-                                      "w2_weight_tensors": [None for _ in range(config.ffn_config.moe_num_experts)],
-                                      }
-    new_weights_iterator = []
+    w1_weight_name = "w1.weight"
+    v1_weight_name = "v1.weight"
+    w2_weight_name = "w2.weight"
 
     q_proj_name = "norm_attn_norm.attn.q_proj.weight"
     k_proj_name = "norm_attn_norm.attn.k_proj.weight"
     v_proj_name = "norm_attn_norm.attn.v_proj.weight"
+
+    for i in range(config.n_layers):
+        split_weights_dict[str(i)] = {w1_weight_name: [None for _ in range(config.ffn_config.moe_num_experts)],
+                                      v1_weight_name: [None for _ in range(config.ffn_config.moe_num_experts)],
+                                      w2_weight_name: [None for _ in range(config.ffn_config.moe_num_experts)],
+                                      }
+    new_weights_iterator = []
 
     for name, loaded_weight in weights_iterator:
 
         split_result = [s.strip() for s in name.split(".") if s]
 
         # example name: transformer.blocks.0.ffn.experts.mlp.15.w2.weight
-        if len(split_result) == 9 and split_result[5] == "mlp":
+        print("split_result", name, split_result)
+        if (len(split_result) == 9 and split_result[3] == "ffn" and split_result[4] == "experts"
+                and split_result[5] == "mlp" and split_result[-1] == "weight"):
             block_index = split_result[2]
             mlp_index = int(split_result[6])
-            if name.endswith("w1.weight"):
-                ws_ws2_weight_dict[block_index]["w1_weight_tensors"][mlp_index] = loaded_weight
-                continue
-            elif name.endswith("v1.weight"):
-                ws_ws2_weight_dict[block_index]["v1_weight_tensors"][mlp_index] = loaded_weight
-                continue
-            elif name.endswith("w2.weight"):
-                ws_ws2_weight_dict[block_index]["w2_weight_tensors"][mlp_index] = loaded_weight
-                continue
-
+            for n in [w1_weight_name, v1_weight_name, w2_weight_name]:
+                if name.endswith(n):
+                    print("w1/v1/w2 name", name)
+                    split_weights_dict[block_index][n][mlp_index] = loaded_weight
+                    break
         # example name: transformer.blocks.0.norm_attn_norm.attn.k_proj.weight
-        if len(split_result) == 7 and split_result[4] == "attn":
+        elif (len(split_result) == 7 and split_result[3] == "norm_attn_norm" and split_result[4] == "attn"
+              and split_result[-1] == "weight"):
             block_index = split_result[2]
-            if name.endswith(q_proj_name):
-                ws_ws2_weight_dict[block_index][q_proj_name] = loaded_weight
-                continue
-            elif name.endswith(k_proj_name):
-                ws_ws2_weight_dict[block_index][k_proj_name] = loaded_weight
-                continue
-            elif name.endswith(v_proj_name):
-                ws_ws2_weight_dict[block_index][v_proj_name] = loaded_weight
-                continue
-
-        new_weights_iterator.append((name, loaded_weight))
+            for n in [q_proj_name, k_proj_name, v_proj_name]:
+                if name.endswith(n):
+                    print("qkv name", name)
+                    split_weights_dict[block_index][n] = loaded_weight
+                    break
+        else:
+            print("no split layer, name", name)
+            new_weights_iterator.append((name, loaded_weight))
 
 
-    # merge ffn.experts.mlp w1/v1/w2 weights
-    for k, v in ws_ws2_weight_dict.items():
+    # merge split weights
+    for k, v in split_weights_dict.items():
         mlp_prefix = f"transformer.blocks.{k}.ffn.experts.mlp."
         start = time.perf_counter()
-        new_weights_iterator.append((f"{mlp_prefix}w1", torch.cat(v["w1_weight_tensors"], dim=0)))
-        new_weights_iterator.append((f"{mlp_prefix}v1", torch.cat(v["v1_weight_tensors"], dim=0)))
-        new_weights_iterator.append((f"{mlp_prefix}w2", torch.cat(v["w2_weight_tensors"], dim=0)))
+        new_weights_iterator.append((f"{mlp_prefix}w1", torch.cat(v[w1_weight_name], dim=0)))
+        new_weights_iterator.append((f"{mlp_prefix}v1", torch.cat(v[v1_weight_name], dim=0)))
+        new_weights_iterator.append((f"{mlp_prefix}w2", torch.cat(v[w2_weight_name], dim=0)))
         print(f"merged {mlp_prefix}w1/v1/w2 weights ... take {time.perf_counter()-start} s.")
 
         start = time.perf_counter()
