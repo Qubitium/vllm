@@ -182,48 +182,14 @@ class DbrxAttention(nn.Module):
         self.qkv_split = config.qkv_split
 
         # pylint: disable=invalid-name
-<<<<<<< HEAD
-        if config.qkv_split:
-=======
-        if self.config.qkv_split:
->>>>>>> parent of 5051c25 (fix qkv_split layer error)
-            self.q_proj = RowParallelLinear(
-                self.d_model,
-                self.d_model,
-                bias=False,
-                linear_method=linear_method,
-            )
-
-            self.k_proj = RowParallelLinear(
-                self.d_model,
-<<<<<<< HEAD
-                config.attn_config.kv_n_heads * self.head_dim,
-=======
-                self.d_model,
->>>>>>> parent of 5051c25 (fix qkv_split layer error)
-                bias=False,
-                linear_method=linear_method,
-            )
-
-            self.v_proj = RowParallelLinear(
-                self.d_model,
-<<<<<<< HEAD
-                config.attn_config.kv_n_heads * self.head_dim,
-=======
-                self.d_model,
->>>>>>> parent of 5051c25 (fix qkv_split layer error)
-                bias=False,
-                linear_method=linear_method,
-            )
-        else:
-            self.Wqkv = QKVParallelLinear(
+        self.Wqkv = QKVParallelLinear(
                 self.d_model,
                 self.head_dim,
                 self.total_num_heads,
                 self.total_num_kv_heads,
                 bias=False,
                 linear_method=linear_method,
-            )
+        )
 
         self.out_proj = RowParallelLinear(
             self.d_model,
@@ -269,21 +235,11 @@ class DbrxAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if self.config.qkv_split:
-            q = self.q_proj(hidden_states)
-            k = self.k_proj(hidden_states)
-            v = self.v_proj(hidden_states)
-        else:
-            qkv, _ = self.Wqkv(hidden_states)
+        qkv, _ = self.Wqkv(hidden_states)
 
         if self.clip_qkv is not None:
-            if self.config.qkv_split:
-                q = q.clamp(min=-self.clip_qkv, max=self.clip_qkv)
-                k = k.clamp(min=-self.clip_qkv, max=self.clip_qkv)
-                v = v.clamp(min=-self.clip_qkv, max=self.clip_qkv)
-            else:
-                qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
-                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
