@@ -211,6 +211,12 @@ class GPTQLinearMethod(LinearMethodBase):
             layer.exllama_state = ExllamaState.READY
             ops.gptq_shuffle(layer.qweight, layer.g_idx,
                              self.quant_config.weight_bits)
+
+        # FIXME
+        # TEST for gptq_v2 ONLY!!!!!!!!!
+        # ref: https://github.com/AutoGPTQ/AutoGPTQ/pull/640/files#diff-426b34df9e6c820d8f15217a86004977116ade694a921b73edb49a4023622b30R187
+        layer.qzeros.data -= 0b00010001000100010001000100010001
+
         output = ops.gptq_gemm(reshaped_x, layer.qweight, layer.qzeros,
                                layer.scales, layer.g_idx,
                                layer.exllama_state == ExllamaState.READY,
